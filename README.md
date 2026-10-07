@@ -116,15 +116,15 @@ webhook.data.delivery_address
 A delivery address such as:
 
 ```text
-285 Bishan St 22
-02-219
-Singapore 570285
+111 Singapore Central
+11-1234
+Singapore 123456
 ```
 
 will result in:
 
 ```text
-570285
+123456
 ```
 
 being extracted as the postcode.
@@ -144,10 +144,10 @@ The Worker:
 Example:
 
 ```text
-Postcode: 570285
+Postcode: 123556
 
-Latitude: 1.xxxxx
-Longitude: 103.xxxxx
+Latitude: 55.xxxxx
+Longitude: 66.xxxxx
 ```
 
 ## Lalamove Integration
@@ -297,7 +297,7 @@ curl -X POST "https://your-worker.example.workers.dev" \
     "event": "order.reserved",
     "data": {
       "starts_at": "2026-10-22T12:00:00.000000+00:00",
-      "delivery_address": "285 Bishan St 22\n02-219\nSingapore 570285"
+      "delivery_address": "111 Singapore Central\n11-123\nSingapore 123456"
     }
   }'
 ```
