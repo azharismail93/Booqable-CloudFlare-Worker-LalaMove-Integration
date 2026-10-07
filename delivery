@@ -1,0 +1,1167 @@
+// ========================================
+// Cloudflare Worker
+// Booqable → OneMap → Lalamove
+// ========================================
+
+
+export default {
+
+  async fetch(request, env) {
+
+
+    // ========================================
+    // Only accept POST
+    // ========================================
+
+    if (request.method !== "POST") {
+
+      return new Response(
+        "Only POST requests are accepted",
+        {
+          status: 405
+        }
+      );
+
+    }
+
+
+    // ========================================
+    // Read Booqable webhook
+    // ========================================
+
+    let webhook;
+
+    try {
+
+      webhook =
+        await request.json();
+
+    } catch (error) {
+
+      return Response.json(
+        {
+          success: false,
+          error: "Invalid JSON received"
+        },
+        {
+          status: 400
+        }
+      );
+
+    }
+
+
+    // ========================================
+    // Check event
+    // ========================================
+
+    const event =
+      webhook.event;
+
+
+    console.log(
+      "Booqable event:",
+      event
+    );
+
+
+    // Only process reserved orders
+
+    if (event !== "order.reserved") {
+
+      return Response.json({
+
+        success: true,
+
+        message:
+          "Event ignored",
+
+        event:
+          event
+
+      });
+
+    }
+
+
+    // ========================================
+    // Get Booqable data
+    // ========================================
+
+    const startsAt =
+      webhook.data.starts_at;
+
+    const deliveryAddress =
+      webhook.data.delivery_address;
+
+
+    if (!startsAt || !deliveryAddress) {
+
+      return Response.json(
+        {
+          success: false,
+
+          error:
+            "Missing starts_at or delivery_address"
+
+        },
+        {
+          status: 400
+        }
+      );
+
+    }
+
+
+    console.log(
+      "Starts At:",
+      startsAt
+    );
+
+    console.log(
+      "Delivery Address:",
+      deliveryAddress
+    );
+
+
+    // ========================================
+    // Extract postcode
+    // ========================================
+
+    const postcodeMatch =
+      deliveryAddress.match(
+        /\b(\d{6})\b/
+      );
+
+
+    if (!postcodeMatch) {
+
+      return Response.json(
+        {
+          success: false,
+
+          error:
+            "Could not find Singapore postcode",
+
+          address:
+            deliveryAddress
+
+        },
+        {
+          status: 400
+        }
+      );
+
+    }
+
+
+    const postcode =
+      postcodeMatch[1];
+
+
+    console.log(
+      "Postcode:",
+      postcode
+    );
+
+
+    // ========================================
+    // Get coordinates from OneMap
+    // ========================================
+
+    let coordinates;
+
+    try {
+
+      coordinates =
+        await getOneMapCoordinates(
+          postcode,
+          env
+        );
+
+    } catch (error) {
+
+      console.error(
+        "OneMap error:",
+        error
+      );
+
+
+      return Response.json(
+        {
+          success: false,
+
+          error:
+            "Unable to get coordinates from OneMap",
+
+          details:
+            error.message
+
+        },
+        {
+          status: 502
+        }
+      );
+
+    }
+
+
+    console.log(
+      "Latitude:",
+      coordinates.latitude
+    );
+
+    console.log(
+      "Longitude:",
+      coordinates.longitude
+    );
+
+
+    // ========================================
+    // Convert Booqable start time
+    // Minus 3 hours for Lalamove - UTC Time
+    // ========================================
+
+    const scheduleAt =
+      new Date(
+        new Date(startsAt).getTime()
+        -
+        (3 * 60 * 60 * 1000)
+        -
+        (8 * 60 * 60 * 1000)
+      ).toISOString();
+
+
+    console.log(
+      "Booqable starts_at:",
+      startsAt
+    );
+
+    console.log(
+      "Lalamove scheduleAt:",
+      scheduleAt
+    );
+
+
+    // ========================================
+    // Build Lalamove quotation payload
+    // ========================================
+
+    const lalamovePayload = {
+
+      data: {
+
+        scheduleAt:
+          scheduleAt,
+
+        serviceType:
+          "CAR",
+
+        language:
+          "en_SG",
+
+
+        // ====================================
+        // Stops
+        // ====================================
+
+        stops: [
+
+          // ----------------------------------
+          // Pickup
+          // ----------------------------------
+
+          {
+
+            coordinates: {
+
+              lat:
+                env.BUBBARENT_PICKUP_LAT,
+
+              lng:
+                env.BUBBARENT_PICKUP_LNG
+
+            },
+
+            address:
+              env.BUBBARENT_PICKUP_ADDRESS
+
+          },
+
+
+          // ----------------------------------
+          // Customer
+          // ----------------------------------
+
+          {
+
+            coordinates: {
+
+              lat:
+                coordinates.latitude,
+
+              lng:
+                coordinates.longitude
+
+            },
+
+            address:
+              deliveryAddress
+
+          }
+
+        ],
+
+
+        // ====================================
+        // Item
+        // ====================================
+
+        item: {
+
+          quantity:
+            "1",
+
+          weight:
+            "1_TO_10_KG",
+
+          categories:
+            [
+              "Baby Stroller/Cot (Folded)"
+            ],
+
+          handlingInstructions:
+            [
+              "FRAGILE"
+            ]
+
+        }
+
+      }
+
+    };
+
+
+    // ========================================
+    // Convert to JSON
+    // ========================================
+
+    const body =
+      JSON.stringify(
+        lalamovePayload
+      );
+
+
+    console.log(
+      "Lalamove quotation body:",
+      body
+    );
+
+
+    // ========================================
+    // Send quotation to Lalamove
+    // ========================================
+
+    try {
+
+      const quotationResult =
+        await sendToLalamove(
+          body,
+          env
+        );
+
+
+      console.log(
+        "Lalamove quotation result:",
+        quotationResult
+      );
+
+
+      // ======================================
+      // Check quotation request
+      // ======================================
+
+      if (!quotationResult.success) {
+
+        return Response.json(
+          {
+            success: false,
+
+            error:
+              "Lalamove quotation request failed",
+
+            lalamove:
+              quotationResult
+
+          },
+          {
+            status: 502
+          }
+        );
+
+      }
+
+
+      // ======================================
+      // Parse quotation response
+      // ======================================
+
+      let quotationData;
+
+      try {
+
+        quotationData =
+          JSON.parse(
+            quotationResult.response
+          );
+
+      } catch (error) {
+
+        return Response.json(
+          {
+            success: false,
+
+            error:
+              "Unable to parse Lalamove quotation response",
+
+            lalamove:
+              quotationResult
+
+          },
+          {
+            status: 502
+          }
+        );
+
+      }
+
+
+      // ======================================
+      // Extract quotationId
+      // ======================================
+
+      const quotationId =
+      quotationData.data.quotationId;
+
+      const senderStopId =
+      quotationData.data.stops[0].stopId;
+
+      const recipientStopId =
+      quotationData.data.stops[1].stopId;
+
+      console.log(
+        "Lalamove quotationId:",
+        quotationId
+      );
+
+
+      if (!quotationId) {
+
+        return Response.json(
+          {
+            success: false,
+
+            error:
+              "Lalamove quotationId was not returned",
+
+            lalamove:
+              quotationData
+
+          },
+          {
+            status: 502
+          }
+        );
+
+      }
+
+
+      // ======================================
+      // Create actual Lalamove order
+      // ======================================
+
+      const orderResult =
+        await createLalamoveOrder(
+          quotationId,
+          senderStopId,
+          recipientStopId,
+          env
+        );
+
+
+      console.log(
+        "Lalamove order result:",
+        orderResult
+      );
+
+
+      // ======================================
+      // Return final result
+      // ======================================
+
+      return Response.json({
+
+        success:
+          orderResult.success,
+
+        booqable: {
+
+          startsAt:
+            startsAt,
+
+          deliveryAddress:
+            deliveryAddress,
+
+          postcode:
+            postcode
+
+        },
+
+        onemap: {
+
+          latitude:
+            coordinates.latitude,
+
+          longitude:
+            coordinates.longitude
+
+        },
+
+        lalamove: {
+
+          quotation: {
+
+            quotationId:
+              quotationId,
+
+            result:
+              quotationResult
+
+          },
+
+          order:
+            orderResult
+
+        }
+
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "Lalamove error:",
+        error
+      );
+
+
+      return Response.json(
+        {
+          success: false,
+
+          error:
+            "Lalamove request failed",
+
+          details:
+            error.message
+
+        },
+        {
+          status: 502
+        }
+      );
+
+    }
+
+  }
+
+};
+
+
+// ==================================================
+// OneMap
+// ==================================================
+
+async function getOneMapCoordinates(
+  postcode,
+  env
+) {
+
+
+  // ========================================
+  // Get OneMap token
+  // ========================================
+
+  const tokenResponse =
+    await fetch(
+      "https://www.onemap.gov.sg/api/auth/post/getToken",
+      {
+
+        method:
+          "POST",
+
+        headers: {
+
+          "Content-Type":
+            "application/json",
+
+          "Accept":
+            "application/json"
+
+        },
+
+        body:
+          JSON.stringify({
+
+            email:
+              env.ONEMAP_EMAIL,
+
+            password:
+              env.ONEMAP_PASSWORD
+
+          })
+
+      }
+    );
+
+
+  const tokenText =
+    await tokenResponse.text();
+
+
+  if (!tokenResponse.ok) {
+
+    throw new Error(
+      `OneMap authentication failed: ${tokenResponse.status} ${tokenText}`
+    );
+
+  }
+
+
+  const tokenData =
+    JSON.parse(
+      tokenText
+    );
+
+
+  const token =
+    tokenData.access_token;
+
+
+  if (!token) {
+
+    throw new Error(
+      "OneMap did not return an access token"
+    );
+
+  }
+
+
+  // ========================================
+  // Search postcode
+  // ========================================
+
+  const searchUrl =
+    "https://www.onemap.gov.sg/api/common/elastic/search" +
+    "?searchVal=" +
+    encodeURIComponent(postcode) +
+    "&returnGeom=Y" +
+    "&getAddrDetails=Y";
+
+
+  const searchResponse =
+    await fetch(
+      searchUrl,
+      {
+
+        method:
+          "GET",
+
+        headers: {
+
+          "Authorization":
+            token,
+
+          "Accept":
+            "application/json"
+
+        }
+
+      }
+    );
+
+
+  const searchText =
+    await searchResponse.text();
+
+
+  if (!searchResponse.ok) {
+
+    throw new Error(
+      `OneMap search failed: ${searchResponse.status} ${searchText}`
+    );
+
+  }
+
+
+  const searchData =
+    JSON.parse(
+      searchText
+    );
+
+
+  if (
+    !searchData.results ||
+    searchData.results.length === 0
+  ) {
+
+    throw new Error(
+      `No OneMap results found for postcode ${postcode}`
+    );
+
+  }
+
+
+  const result =
+    searchData.results[0];
+
+
+  if (
+    !result.LATITUDE ||
+    !result.LONGITUDE
+  ) {
+
+    throw new Error(
+      "OneMap result did not contain coordinates"
+    );
+
+  }
+
+
+  return {
+
+    latitude:
+      result.LATITUDE,
+
+    longitude:
+      result.LONGITUDE
+
+  };
+
+}
+
+
+// ==================================================
+// Generate HMAC-SHA256
+// ==================================================
+
+async function generateHmacSha256(
+  secret,
+  message
+) {
+
+  const encoder =
+    new TextEncoder();
+
+
+  const key =
+    await crypto.subtle.importKey(
+
+      "raw",
+
+      encoder.encode(
+        secret
+      ),
+
+      {
+
+        name:
+          "HMAC",
+
+        hash:
+          "SHA-256"
+
+      },
+
+      false,
+
+      [
+        "sign"
+      ]
+
+    );
+
+
+  const signature =
+    await crypto.subtle.sign(
+
+      "HMAC",
+
+      key,
+
+      encoder.encode(
+        message
+      )
+
+    );
+
+
+  return Array
+    .from(
+      new Uint8Array(
+        signature
+      )
+    )
+    .map(
+      byte =>
+        byte
+          .toString(16)
+          .padStart(2, "0")
+    )
+    .join("");
+
+}
+
+
+// ==================================================
+// Send quotation to Lalamove
+// ==================================================
+
+async function sendToLalamove(
+  body,
+  env
+) {
+
+  const method =
+    "POST";
+
+
+  const path =
+    "/v3/quotations";
+
+
+  // ========================================
+  // Timestamp
+  // ========================================
+
+  const timestamp =
+    Date.now().toString();
+
+
+  // ========================================
+  // String to sign
+  // ========================================
+
+  const stringToSign =
+    timestamp +
+    "\r\n" +
+    method +
+    "\r\n" +
+    path +
+    "\r\n\r\n" +
+    body;
+
+
+  console.log(
+    "Lalamove quotation string to sign:",
+    stringToSign
+  );
+
+
+  // ========================================
+  // HMAC
+  // ========================================
+
+  const signature =
+    await generateHmacSha256(
+      env.LALAMOVE_API_SECRET,
+      stringToSign
+    );
+
+
+  console.log(
+    "Lalamove quotation signature:",
+    signature
+  );
+
+
+  // ========================================
+  // Authorization
+  // ========================================
+
+  const authorization =
+    `hmac ${env.LALAMOVE_API_KEY}:${timestamp}:${signature}`;
+
+
+  // ========================================
+  // API request
+  // ========================================
+
+  const response =
+    await fetch(
+      "https://rest.lalamove.com" +
+      path,
+      {
+
+        method:
+          method,
+
+        headers: {
+
+          "Content-Type":
+            "application/json",
+
+          "Authorization":
+            authorization,
+
+          "Market":
+            "SG"
+
+        },
+
+        body:
+          body
+
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  console.log(
+    "Lalamove quotation HTTP status:",
+    response.status
+  );
+
+
+  console.log(
+    "Lalamove quotation response:",
+    responseText
+  );
+
+
+  return {
+
+    success:
+      response.ok,
+
+    status:
+      response.status,
+
+    response:
+      responseText
+
+  };
+
+}
+
+
+// ==================================================
+// Create Lalamove Order
+// ==================================================
+
+async function createLalamoveOrder(
+  quotationId,
+  senderStopId,
+  recipientStopId,
+  env
+) {
+
+  const method =
+    "POST";
+
+
+  const path =
+    "/v3/orders";
+
+  // ========================================
+  // Build order payload
+  // ========================================
+
+  const orderPayload = {
+
+    data: {
+
+      quotationId:
+        quotationId,
+
+      sender: {
+
+        stopId:
+          senderStopId,
+
+        name:
+          "BubbaRent",
+
+        phone:
+          "+6580755305"
+
+      },
+
+      recipients: [
+
+        {
+
+          stopId:
+            recipientStopId,
+
+          name:
+            "Concierge/Reception",
+
+          phone:
+            "+6580755305",
+
+          remarks:
+            "Please deliver to concierge/reception.\r\nFor non-hotel delivery, please deliver to recipient directly.\r\nRecipient name, phone number and reservation details are provided on the stroller tag."
+
+        }
+
+      ]
+
+    }
+
+  };
+
+
+  // ========================================
+  // Convert to JSON
+  // ========================================
+
+  const body =
+    JSON.stringify(
+      orderPayload
+    );
+
+
+  console.log(
+    "Lalamove order body:",
+    body
+  );
+
+
+  // ========================================
+  // Timestamp
+  // ========================================
+
+  const timestamp =
+    Date.now().toString();
+
+
+  // ========================================
+  // String to sign
+  // ========================================
+
+  const stringToSign =
+    timestamp +
+    "\r\n" +
+    method +
+    "\r\n" +
+    path +
+    "\r\n\r\n" +
+    body;
+
+
+  console.log(
+    "Lalamove order string to sign:",
+    stringToSign
+  );
+
+
+  // ========================================
+  // Generate HMAC
+  // ========================================
+
+  const signature =
+    await generateHmacSha256(
+      env.LALAMOVE_API_SECRET,
+      stringToSign
+    );
+
+
+  console.log(
+    "Lalamove order signature:",
+    signature
+  );
+
+
+  // ========================================
+  // Authorization
+  // ========================================
+
+  const authorization =
+    `hmac ${env.LALAMOVE_API_KEY}:${timestamp}:${signature}`;
+
+
+  // ========================================
+  // API request
+  // ========================================
+
+  const response =
+    await fetch(
+      "https://rest.lalamove.com" +
+      path,
+      {
+
+        method:
+          method,
+
+        headers: {
+
+          "Content-Type":
+            "application/json",
+
+          "Authorization":
+            authorization,
+
+          "Market":
+            "SG"
+
+        },
+
+        body:
+          body
+
+      }
+    );
+
+
+  // ========================================
+  // Read response
+  // ========================================
+
+  const responseText =
+    await response.text();
+
+
+  console.log(
+    "Lalamove order HTTP status:",
+    response.status
+  );
+
+
+  console.log(
+    "Lalamove order response:",
+    responseText
+  );
+
+
+  // ========================================
+  // Return result
+  // ========================================
+
+  return {
+
+    success:
+      response.ok,
+
+    status:
+      response.status,
+
+    response:
+      responseText
+
+  };
+
+}
